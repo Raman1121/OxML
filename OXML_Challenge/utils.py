@@ -133,6 +133,14 @@ def tune_attention_layers(model, model_type):
             except:
                 print('no patch embed')
 
+def enable_ssf_update(model):
+    disable_module(model)
+    for n,p in model.named_parameters():
+        if('ssf' in n):
+            p.requires_grad = True
+        else:
+            p.requires_grad = False
+
 ####################################################################
 
 def get_model_peft(model, method, **kwargs):
@@ -143,7 +151,7 @@ def get_model_peft(model, method, **kwargs):
     elif(method == 'bitfit'):
         get_model_for_bitfit(model, model_type='timm')
     elif(method == 'lora'):
-        create_lora_model(model)
+        model = create_lora_model(model)
     elif(method == 'tune_attention'):
         tune_attention_layers(model, model_type='timm')
     elif(method == 'ssf'):
@@ -153,6 +161,8 @@ def get_model_peft(model, method, **kwargs):
             model = vit_SSF.vit_large_patch16_224(pretrained=True)
         elif(kwargs["encoder"] == 'vit_huge'):
             model = vit_SSF.vit_huge_patch14_224(pretrained=True)
+
+        enable_ssf_update(model)
 
     enable_module(model.head)
     return model

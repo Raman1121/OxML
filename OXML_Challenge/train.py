@@ -218,6 +218,8 @@ def main(args):
     val_dir = os.path.join(args.data_path, "val")
     dataset, dataset_test, train_sampler, test_sampler = load_data(train_dir, val_dir, args)
 
+    args.num_classes = len(dataset.classes)
+
     collate_fn = None
     num_classes = len(dataset.classes)
     mixup_transforms = []
@@ -246,7 +248,7 @@ def main(args):
     print("Creating model")
     # model = torchvision.models.get_model(args.model, weights=args.weights, num_classes=num_classes)
     model = utils.get_timm_model(args.encoder, num_classes=args.num_classes)
-    model = utils.get_model_peft(model)
+    model = utils.get_model_peft(model, args.tuning_method, encoder=args.encoder)
     model.to(device)
 
     utils.check_tunable_params(model)
@@ -363,34 +365,37 @@ def main(args):
             evaluate(model, criterion, data_loader_test, device=device)
         return
 
-    print("Start training")
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
-        train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
-        lr_scheduler.step()
-        evaluate(model, criterion, data_loader_test, device=device)
-        if model_ema:
-            evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
-        if args.output_dir:
-            checkpoint = {
-                "model": model_without_ddp.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "lr_scheduler": lr_scheduler.state_dict(),
-                "epoch": epoch,
-                "args": args,
-            }
+    if(args.disable_training):
+        print("Training Process Skipped")
+    else:
+        print("Start training")
+        start_time = time.time()
+        for epoch in range(args.start_epoch, args.epochs):
+            if args.distributed:
+                train_sampler.set_epoch(epoch)
+            train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
+            lr_scheduler.step()
+            evaluate(model, criterion, data_loader_test, device=device)
             if model_ema:
-                checkpoint["model_ema"] = model_ema.state_dict()
-            if scaler:
-                checkpoint["scaler"] = scaler.state_dict()
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+                evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
+            if args.output_dir:
+                checkpoint = {
+                    "model": model_without_ddp.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "lr_scheduler": lr_scheduler.state_dict(),
+                    "epoch": epoch,
+                    "args": args,
+                }
+                if model_ema:
+                    checkpoint["model_ema"] = model_ema.state_dict()
+                if scaler:
+                    checkpoint["scaler"] = scaler.state_dict()
+                utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+                utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Training time {total_time_str}")
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print(f"Training time {total_time_str}")
 
 
 def get_args_parser(add_help=True):
@@ -398,7 +403,7 @@ def get_args_parser(add_help=True):
 
     parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
 
-    parser.add_argument("--data-path", default="/home/co-dutt1/rds/hpc-work/ALL_DATASETS/OXML", type=str, help="dataset path")
+    parser.add_argument("--data-path", default="/disk/scratch2/raman/ALL_DATASETS/OXML", type=str, help="dataset path")
     parser.add_argument("--encoder", default="resnet18", type=str, help="model name")
     parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
     parser.add_argument(
@@ -522,6 +527,13 @@ def get_args_parser(add_help=True):
     )
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
+    parser.add_argument(
+                            "--disable_training",
+                            action="store_true",
+                            help="To disable/ skip the training process.",
+                        )
+    parser.add_argument("--tuning_method", default='fullft', type=str, help="Type of fine-tuning method to use")
+    
     return parser
 
 
