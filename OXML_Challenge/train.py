@@ -17,6 +17,9 @@ from torch import nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 
+from focal_loss.focal_loss import FocalLoss
+
+
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
     model.train()
@@ -30,7 +33,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
         image, target = image.to(device), target.to(device)
         with torch.cuda.amp.autocast(enabled=scaler is not None):
             output = model(image)
-            loss = criterion(output, target)
+
+            if(args.use_focal_loss):
+                loss = criterion(nn.Softmax(dim=-1)(output), target)
+            else:
+                loss = criterion(output, target)
 
         optimizer.zero_grad()
         if scaler is not None:
@@ -53,7 +60,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
                 # Reset ema buffer to keep copying weights during warmup period
                 model_ema.n_averaged.fill_(0)
 
-        acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = utils.accuracy(output, target, topk=(1, args.num_classes))
         batch_size = image.shape[0]
         metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
@@ -72,9 +79,13 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
             image = image.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
             output = model(image)
-            loss = criterion(output, target)
+            
+            if(args.use_focal_loss):
+                loss = criterion(nn.Softmax(dim=-1)(output), target)
+            else:
+                loss = criterion(output, target)
 
-            acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+            acc1, acc5 = utils.accuracy(output, target, topk=(1, args.num_classes))
             # FIXME need to take into account that the datasets
             # could have been padded in distributed setup
             batch_size = image.shape[0]
@@ -202,6 +213,7 @@ def load_data(traindir, valdir, args):
 def main(args):
     if args.output_dir:
         utils.mkdir(args.output_dir)
+        utils.mkdir(os.path.join(args.output_dir, 'checkpoints'))
 
     utils.init_distributed_mode(args)
     print(args)
@@ -256,7 +268,10 @@ def main(args):
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    if(args.use_focal_loss):
+        criterion = FocalLoss(gamma=0.7)
+    else:
+        criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
     custom_keys_weight_decay = []
     if args.bias_weight_decay is not None:
@@ -391,7 +406,9 @@ def main(args):
                 if scaler:
                     checkpoint["scaler"] = scaler.state_dict()
                 utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-                utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+                ckpt_path = os.path.join(args.output_dir, 'checkpoints', "checkpoint_" + args.tuning_method + ".pth")
+                #utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+                utils.save_on_master(checkpoint, ckpt_path)
 
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -533,10 +550,13 @@ def get_args_parser(add_help=True):
                             help="To disable/ skip the training process.",
                         )
     parser.add_argument("--tuning_method", default='fullft', type=str, help="Type of fine-tuning method to use")
+    parser.add_argument("--use_focal_loss",  action="store_true", help="Use focal loss")
     
     return parser
 
 
 if __name__ == "__main__":
     args = get_args_parser().parse_args()
+    args.output_dir = os.path.join(os.getcwd(), args.encoder)
+
     main(args)
